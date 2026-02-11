@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"sync"
 )
 
 // RequestHandler is implemented by each protocol.
@@ -58,6 +59,8 @@ func (s *Server) Close() error {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	var writeMu sync.Mutex
+
 	for {
 		payload, err := ReadFrame(conn)
 		if err != nil {
@@ -66,18 +69,19 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		reqID, op, err := DecodeRequest(payload)
 		if err != nil {
-			log.Printf("[tsujido] decode error: %v", err)
 			return
 		}
 
-		result, err := s.handler.HandleRequest(context.Background(), op)
-		if err != nil {
-			result = Result{Success: false, Value: err.Error()}
-		}
+		go func(reqID uint64, op Operation) {
+			result, err := s.handler.HandleRequest(context.Background(), op)
+			if err != nil {
+				result = Result{Success: false, Value: err.Error()}
+			}
 
-		resp := EncodeResponse(reqID, result)
-		if _, err := conn.Write(resp); err != nil {
-			return
-		}
+			resp := EncodeResponse(reqID, result)
+			writeMu.Lock()
+			conn.Write(resp)
+			writeMu.Unlock()
+		}(reqID, op)
 	}
 }

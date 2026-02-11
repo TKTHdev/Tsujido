@@ -109,7 +109,7 @@ func (y *YCSBRunner) worker(ctx context.Context) workerResult {
 			select {
 			case <-ctx.Done():
 				return res
-			default:
+			case <-time.After(50 * time.Millisecond):
 			}
 			continue
 		}

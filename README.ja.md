@@ -1,13 +1,12 @@
 # tsujido
 [English](README.md) | [日本語](README.ja.md)
-`tsujido` は、分散システムプロトコル（Chain Replication, Raft, PBFTなど）を構築・ベンチマークするための軽量な Go フレームワークです。ネットワーク通信、シリアライゼーション、ステートマシン、ベンチマークツールといった共通インフラを提供し、開発者がコンセンサスやレプリケーションのロジックの実装に集中できるように設計されています。
+
+`tsujido` は、分散システム向けの冪等性保証付きステートマシンです。
 
 ## 特徴
 
-- **ネットワーキング**: 堅牢な TCP ベースの `Server` および `Client` 実装。
-- **ワイヤープロトコル**: 操作（GET, SET, DELETE）のための効率的なカスタムバイナリシリアライゼーション。
-- **ステートマシン**: 標準的な操作をサポートする内蔵インメモリ Key-Value ストア (`KVStore`)。
-- **ベンチマーク**: YCSB ワークロード (A, B, C) をシミュレートし、スループットとレイテンシを計測する `YCSBRunner` を統合。
+- **Query / Submit**: 読み取りは書き込みチャネルをバイパス (`RLock`)、書き込みは単一 goroutine で逐次実行。
+- **冪等性**: 同じ `ClientID` + `Seq` の書き込みはキャッシュされた結果を返し、再実行されない。
 
 ## インストール
 
@@ -17,69 +16,27 @@ go get github.com/TKTHdev/tsujido
 
 ## 使い方
 
-`tsujido` を使用するには、通常 `RequestHandler` インターフェースを実装し、独自のプロトコルロジックを記述します。
-
-### 1. Request Handler の実装
-
 ```go
-package main
+sm := tsujido.NewStateMachine()
+defer sm.Stop()
 
-import (
-	"context"
-	"github.com/TKTHdev/tsujido"
-)
+// 書き込み
+sm.Submit(
+    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
+    tsujido.Operation{Key: "x", Value: "hello"},
+) // {Success: true, Value: "OK"}
 
-type MyProtocol struct {
-	sm tsujido.StateMachine
-}
+// 読み取り
+sm.Query("x") // {Success: true, Value: "hello"}
 
-func (p *MyProtocol) HandleRequest(ctx context.Context, op tsujido.Operation) (tsujido.Result, error) {
-	// ここにコンセンサスやレプリケーションのロジックを実装します。
-	// 例: 適用する前に他のノードへレプリケーションを行うなど。
-	
-	// ステートマシンに適用
-	return p.sm.Apply(op), nil
-}
-```
-
-### 2. サーバーの起動
-
-```go
-func main() {
-	sm := tsujido.NewKVStore()
-	handler := &MyProtocol{sm: sm}
-	
-	server := tsujido.NewServer(":8080", handler)
-	if err := server.ListenAndServe(); err != nil {
-		panic(err)
-	}
-}
-```
-
-### 3. ベンチマークの実行 (YCSB)
-
-組み込みの YCSB ランナーを使用して、実装のベンチマークを行うクライアントを簡単に作成できます。
-
-```go
-func main() {
-	client, _ := tsujido.NewTCPClient("localhost:8080", "localhost:8080")
-	
-	config := tsujido.YCSBConfig{
-		Workers:  10,
-		Workload: 50, // 50% writes (YCSB-A)
-		Duration: 10 * time.Second,
-		Protocol: "my-protocol",
-	}
-	
-	runner := tsujido.NewYCSBRunner(client, config)
-	runner.Run()
-}
+// Seq=1 を再送 → キャッシュが返り、再実行されない
+sm.Submit(
+    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
+    tsujido.Operation{Key: "x", Value: "overwrite"},
+) // {Success: true, Value: "OK"} (キャッシュ、"x" は "hello" のまま)
 ```
 
 ## 構成
 
-- **`client.go`**: TCP クライアントの実装。
-- **`server.go`**: TCP サーバーのリスナーおよび接続ハンドラー。
-- **`protocol.go`**: ワイヤーフォーマットの定義とシリアライゼーションヘルパー。
-- **`statemachine.go`**: `KVStore` の実装と `StateMachine` インターフェース。
-- **`ycsb.go`**: YCSB 負荷生成ツールと統計収集。
+- **`types.go`** — `Operation`, `RequestID`, `Result`
+- **`statemachine.go`** — `StateMachine`（チャネルベースの逐次書き込み + 冪等性付き KV ストア）

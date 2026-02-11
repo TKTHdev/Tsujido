@@ -1,13 +1,12 @@
 # tsujido
 [English](README.md) | [日本語](README.ja.md)
-`tsujido` is a lightweight Go framework designed for building and benchmarking distributed system protocols (such as Chain Replication, Raft, PBFT). It provides the common infrastructure—networking, serialization, state machine, and benchmarking tools—allowing developers to focus on implementing the consensus or replication logic.
+
+`tsujido` is an idempotent state machine for distributed systems in Go.
 
 ## Features
 
-- **Networking**: Robust TCP-based `Server` and `Client` implementations.
-- **Wire Protocol**: Efficient, custom binary serialization for operations (GET, SET, DELETE).
-- **State Machine**: Built-in in-memory Key-Value Store (`KVStore`) supporting standard operations.
-- **Benchmarking**: Integrated `YCSBRunner` to simulate YCSB workloads (A, B, C) and measure throughput/latency.
+- **Query / Submit**: Reads bypass the write channel (`RLock`), writes are serialized through a single goroutine.
+- **Idempotency**: Duplicate writes (same `ClientID` + `Seq`) return the cached result without re-execution.
 
 ## Installation
 
@@ -17,69 +16,27 @@ go get github.com/TKTHdev/tsujido
 
 ## Usage
 
-To use `tsujido`, you typically implement the `RequestHandler` interface with your specific protocol logic.
-
-### 1. Implement a Request Handler
-
 ```go
-package main
+sm := tsujido.NewStateMachine()
+defer sm.Stop()
 
-import (
-	"context"
-	"github.com/TKTHdev/tsujido"
-)
+// Write
+sm.Submit(
+    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
+    tsujido.Operation{Key: "x", Value: "hello"},
+) // {Success: true, Value: "OK"}
 
-type MyProtocol struct {
-	sm tsujido.StateMachine
-}
+// Read
+sm.Query("x") // {Success: true, Value: "hello"}
 
-func (p *MyProtocol) HandleRequest(ctx context.Context, op tsujido.Operation) (tsujido.Result, error) {
-	// Implement your consensus/replication logic here.
-	// For example, replicate to other nodes before applying.
-	
-	// Apply to state machine locally
-	return p.sm.Apply(op), nil
-}
-```
-
-### 2. Start the Server
-
-```go
-func main() {
-	sm := tsujido.NewKVStore()
-	handler := &MyProtocol{sm: sm}
-	
-	server := tsujido.NewServer(":8080", handler)
-	if err := server.ListenAndServe(); err != nil {
-		panic(err)
-	}
-}
-```
-
-### 3. Run a Benchmark (YCSB)
-
-You can easily build a client to benchmark your implementation using the built-in YCSB runner.
-
-```go
-func main() {
-	client, _ := tsujido.NewTCPClient("localhost:8080", "localhost:8080")
-	
-	config := tsujido.YCSBConfig{
-		Workers:  10,
-		Workload: 50, // 50% writes (YCSB-A)
-		Duration: 10 * time.Second,
-		Protocol: "my-protocol",
-	}
-	
-	runner := tsujido.NewYCSBRunner(client, config)
-	runner.Run()
-}
+// Replay Seq=1 → cached, not re-executed
+sm.Submit(
+    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
+    tsujido.Operation{Key: "x", Value: "overwrite"},
+) // {Success: true, Value: "OK"} (cached, "x" is still "hello")
 ```
 
 ## Structure
 
-- **`client.go`**: TCP client implementation.
-- **`server.go`**: TCP server listener and connection handler.
-- **`protocol.go`**: Wire format definitions and serialization helpers.
-- **`statemachine.go`**: `KVStore` implementation and `StateMachine` interface.
-- **`ycsb.go`**: YCSB load generator and statistics collector.
+- **`types.go`** — `Operation`, `RequestID`, `Result`
+- **`statemachine.go`** — `StateMachine` (idempotent KV store with channel-based serial writes)

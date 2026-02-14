@@ -13,7 +13,7 @@ type command struct {
 	done     chan Result
 }
 
-type StateMachine struct {
+type stateMachine struct {
 	mu       sync.RWMutex
 	data     map[string]string
 	sessions map[string]*clientSession
@@ -21,8 +21,8 @@ type StateMachine struct {
 	pool     sync.Pool
 }
 
-func NewStateMachine() *StateMachine {
-	sm := &StateMachine{
+func newStateMachine() *stateMachine {
+	sm := &stateMachine{
 		data:     make(map[string]string),
 		sessions: make(map[string]*clientSession),
 		ch:       make(chan command),
@@ -32,13 +32,13 @@ func NewStateMachine() *StateMachine {
 	return sm
 }
 
-func (sm *StateMachine) Query(key string) Result {
+func (sm *stateMachine) query(key string) Result {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return Result{Success: true, Value: sm.data[key]}
 }
 
-func (sm *StateMachine) Submit(clientID string, op Operation) Result {
+func (sm *stateMachine) submit(clientID string, op Operation) Result {
 	done := sm.pool.Get().(chan Result)
 	sm.ch <- command{clientID: clientID, op: op, done: done}
 	res := <-done
@@ -46,17 +46,17 @@ func (sm *StateMachine) Submit(clientID string, op Operation) Result {
 	return res
 }
 
-func (sm *StateMachine) Stop() {
+func (sm *stateMachine) stop() {
 	close(sm.ch)
 }
 
-func (sm *StateMachine) loop() {
+func (sm *stateMachine) loop() {
 	for cmd := range sm.ch {
 		cmd.done <- sm.apply(cmd.clientID, cmd.op)
 	}
 }
 
-func (sm *StateMachine) apply(clientID string, op Operation) Result {
+func (sm *stateMachine) apply(clientID string, op Operation) Result {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 

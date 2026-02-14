@@ -1,12 +1,12 @@
 # tsujido
 [English](README.md) | [日本語](README.ja.md)
 
-`tsujido` は、分散システム向けの冪等性保証付きステートマシンです。
+`tsujido` は、分散システム向けのステートマシンライブラリです。チャネルベースの逐次書き込みによる KV ストアと、`Endpoint` によるコンセンサス層との統合インターフェースを提供します。
 
 ## 特徴
 
-- **Query / Submit**: 読み取りは書き込みチャネルをバイパス (`RLock`)、書き込みは単一 goroutine で逐次実行。
-- **冪等性**: 同じ `ClientID` + `Seq` の書き込みはキャッシュされた結果を返し、再実行されない。
+- **Query / Handle**: 読み取りは書き込みチャネルをバイパス (`RLock`)、書き込みは単一 goroutine で逐次実行。
+- **コンセンサス統合**: `Endpoint` の `ProposeCh` / `CommitCh` を通じて外部のコンセンサス層 (Raft, Paxos 等) を接続可能。
 
 ## インストール
 
@@ -17,26 +17,47 @@ go get github.com/TKTHdev/tsujido
 ## 使い方
 
 ```go
-sm := tsujido.NewStateMachine()
-defer sm.Stop()
+ep := tsujido.NewEndpoint()
+defer ep.Stop()
+
+// ProposeCh と CommitCh の間にコンセンサス層を接続する。
+go func() {
+    for req := range ep.ProposeCh {
+        // ここで Raft 等の合意処理を行う。
+        ep.CommitCh <- req
+    }
+}()
 
 // 書き込み
-sm.Submit(
-    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
-    tsujido.Operation{Key: "x", Value: "hello"},
-) // {Success: true, Value: "OK"}
+res := ep.Handle("client-1", tsujido.Operation{Key: "x", Value: "hello"})
+// → Result{Success: true, Value: "OK"}
 
 // 読み取り
-sm.Query("x") // {Success: true, Value: "hello"}
-
-// Seq=1 を再送 → キャッシュが返り、再実行されない
-sm.Submit(
-    tsujido.RequestID{ClientID: "10.0.0.1:40000", Seq: 1},
-    tsujido.Operation{Key: "x", Value: "overwrite"},
-) // {Success: true, Value: "OK"} (キャッシュ、"x" は "hello" のまま)
+res = ep.Query("x")
+// → Result{Success: true, Value: "hello"}
 ```
+
+### フロー
+
+```
+Handle()  →  ProposeCh  →  [コンセンサス層]  →  CommitCh  →  状態適用
+  ↑                                                            |
+  └─────────────── req.done 経由で Result が返る ───────────────┘
+```
+
+## API
+
+| メソッド / フィールド | 説明 |
+|---|---|
+| `NewEndpoint()` | Endpoint を生成（内部 goroutine を起動） |
+| `Handle(clientID, op)` | 書き込みリクエスト（合意 + 適用完了までブロック） |
+| `Query(key)` | 値の読み取り（ノンブロッキング、`RLock` 使用） |
+| `Stop()` | ステートマシンを停止 |
+| `ProposeCh` | 提案されたリクエストを読み取るチャネル |
+| `CommitCh` | 合意済みリクエストを投入するチャネル |
 
 ## 構成
 
-- **`types.go`** — `Operation`, `RequestID`, `Result`
-- **`statemachine.go`** — `StateMachine`（チャネルベースの逐次書き込み + 冪等性付き KV ストア）
+- **`types.go`** — `Operation`, `Result`, `Request`
+- **`statemachine.go`** — 内部ステートマシン（チャネルベースの逐次書き込み KV ストア）
+- **`endpoint.go`** — `Endpoint`（公開 API とコンセンサス層との接続）
